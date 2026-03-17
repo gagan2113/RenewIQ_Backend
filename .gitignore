@@ -1,0 +1,111 @@
+# ------------------------------
+# Secrets and local config
+# ------------------------------
+.env
+.env.*
+!.env.example
+insurance_agent/.env
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ------------------------------
+# Python virtual environments
+# ------------------------------
+.venv/
+venv/
+env/
+ENV/
+insurance_agent/.venv/
+
+# ------------------------------
+# Python cache / bytecode
+# ------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ------------------------------
+# Packaging / build artifacts
+# ------------------------------
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+.installed.cfg
+MANIFEST
+
+# ------------------------------
+# Tooling caches
+# ------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# ------------------------------
+# Jupyter
+# ------------------------------
+.ipynb_checkpoints/
+
+# ------------------------------
+# Logs and runtime files
+# ------------------------------
+logs/
+insurance_agent/logs/
+*.log
+*.pid
+*.seed
+*.out
+*.err
+
+# ------------------------------
+# Local databases and temp data
+# ------------------------------
+*.sqlite
+*.sqlite3
+*.db
+
+# ------------------------------
+# IDE/editor
+# ------------------------------
+.vscode/
+.idea/
+*.code-workspace
+
+# ------------------------------
+# OS/system files
+# ------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ------------------------------
+# Office temporary files
+# ------------------------------
+~$*
+
+# ------------------------------
+# Local sample assets (project-specific)
+# ------------------------------
+IL_RenewIQ_Database_Design.docx
+IL_RenewIQ_Sample_Data.xlsx
