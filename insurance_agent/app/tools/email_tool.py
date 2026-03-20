@@ -148,12 +148,12 @@ def _build_html(customer_name: str, message: str, renewal_link: str, policy_numb
 )
 def _dispatch_email(subject: str, to_email: str, html_content: str) -> dict:
     sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_API_KEY)
-  residency = (settings.SENDGRID_DATA_RESIDENCY or "").strip().lower()
-  if residency == "eu" and hasattr(sg, "set_sendgrid_data_residency"):
-    sg.set_sendgrid_data_residency("eu")
+    residency = (settings.SENDGRID_DATA_RESIDENCY or "").strip().lower()
+    if residency == "eu" and hasattr(sg, "set_sendgrid_data_residency"):
+        sg.set_sendgrid_data_residency("eu")
 
     mail = Mail(
-    from_email=settings.SENDGRID_FROM_EMAIL,
+        from_email=settings.SENDGRID_FROM_EMAIL,
         subject=subject,
         to_emails=To(to_email),
     )
@@ -197,3 +197,4 @@ def send_email(
     except Exception as exc:
         logger.error("Email failed to %s after retries: %s", to_email, exc)
         return {"status": "failed", "status_code": None, "message_id": None, "error": str(exc)}
+

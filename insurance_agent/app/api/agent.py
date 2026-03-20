@@ -101,6 +101,8 @@ def trigger_agent(
         "customer_id": str(customer.id),
         "policy_id": str(policy_id),
         "customer_name": customer.full_name,
+        "phone_number": customer.whatsapp_number or customer.phone,
+        "email": customer.email,
         "policy_type": product.product_name if product else "Insurance Policy",
         "expiry_date": str(policy.risk_end_date),
         "renewal_link": f"https://rnwq.in/{str(policy_id)[:8].lower()}",

@@ -21,7 +21,7 @@ import socket
 import sys
 from datetime import datetime, date
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid5, NAMESPACE_URL
 
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.engine.url import make_url
@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent   # d:/RenewIQ_Backend
 SCHEMA_SQL = PROJECT_ROOT / "icici_lombard_schema.sql"
-EXCEL_FILE = PROJECT_ROOT / "IL_RenewIQ_Sample_Data.xlsx"
+# After 
+EXCEL_FILE = PROJECT_ROOT / "IL_RenewIQ_3Customers.xlsx"
 
 engine = create_engine(settings.DATABASE_URL, echo=False)
 
@@ -100,14 +101,31 @@ def to_int(v):
 
 
 def pad_uuid(short: str) -> str:
-    """Pad an 8-char short UUID to a full 32-hex UUID (adds trailing zeros)."""
+    """Normalize IDs to UUID strings used by app models.
+
+    Accepts:
+      - valid UUID string
+      - 8-char short UUID (pads with zeros)
+      - business IDs like CUST-GV-001 / POL-... (mapped deterministically via UUIDv5)
+    """
     if short is None or short == "":
         return None
-    s = short.strip().upper()
-    if len(s) == 8:
+
+    s = str(short).strip()
+
+    # Already a full UUID
+    try:
+        return str(UUID(s))
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+    # 8-char short UUID support from older sample sheets
+    if len(s) == 8 and all(c in "0123456789abcdefABCDEF" for c in s):
         full = s + "0" * 24
-        return f"{full[:8]}-{full[8:12]}-{full[12:16]}-{full[16:20]}-{full[20:32]}"
-    return s
+        return f"{full[:8]}-{full[8:12]}-{full[12:16]}-{full[16:20]}-{full[20:32]}".lower()
+
+    # Deterministic mapping for human-readable IDs from workbook/schema SQL.
+    return str(uuid5(NAMESPACE_URL, f"renewiq:{s}"))
 
 
 def read_sheet(wb, sheet_name: str, header_row: int = 2):
@@ -115,6 +133,10 @@ def read_sheet(wb, sheet_name: str, header_row: int = 2):
     Read an Excel sheet and yield dicts (header → value).
     header_row is 0-indexed (row 2 = 3rd row in Excel).
     """
+    if sheet_name not in wb.sheetnames:
+        logger.warning("Sheet %s not found. Skipping this section.", sheet_name)
+        return
+
     ws = wb[sheet_name]
     rows = list(ws.iter_rows(values_only=True))
     headers = [str(h).strip() if h else f"_col{i}" for i, h in enumerate(rows[header_row])]
@@ -180,6 +202,42 @@ def run_schema():
         conn.execute(text(sql))
         conn.commit()
     logger.info("Schema created successfully.")
+
+
+def reset_data_only():
+    """Clear business data tables before re-seeding, preserving lookup tables."""
+    logger.info("Resetting existing business data before seeding …")
+    inspector = inspect(engine)
+
+    # Child-to-parent order to satisfy FK dependencies.
+    delete_order = [
+        "whatsapp_logs",
+        "sms_logs",
+        "email_logs",
+        "voice_logs",
+        "payments",
+        "il_claims",
+        "renewal_tokens",
+        "reminders",
+        "campaigns",
+        "insured_members",
+        "il_life_details",
+        "il_commercial_details",
+        "il_home_details",
+        "il_travel_details",
+        "il_motor_details",
+        "il_health_details",
+        "policies",
+        "customers",
+    ]
+
+    existing = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table in delete_order:
+            if table in existing:
+                conn.execute(text(f"DELETE FROM {table}"))
+
+    logger.info("Business data reset complete.")
 
 
 # ── Step 2: Populate lookup maps ────────────────────────────────────
@@ -338,7 +396,7 @@ def seed_customers(wb):
                 "kyc": r.get("KYC Status", "PENDING"),
                 "nri": to_bool(r.get("Is NRI")),
                 "opted": to_bool(r.get("Is Opted Out")),
-                "created": to_datetime(r.get("Created At")),
+                "created": to_datetime(r.get("Created At")) or datetime.utcnow(),
             })
         conn.commit()
     logger.info("  → customers done.")
@@ -346,16 +404,18 @@ def seed_customers(wb):
 
 def seed_policies(wb):
     logger.info("Seeding policies …")
+    sheet_name = "📋 Policies (All)" if "📋 Policies (All)" in wb.sheetnames else "📋 Policies"
     with engine.connect() as conn:
-        for r in read_sheet(wb, "📋 Policies (All)"):
+        for r in read_sheet(wb, sheet_name):
             pid = pad_uuid(r.get("Policy UUID"))
             cid = pad_uuid(r.get("Customer ID"))
             if not pid or not cid:
                 continue
             pc = r.get("Product Code")
             prod_id = PRODUCT_MAP.get(pc, 1)
-            bc = r.get("Branch Code")
-            ac = r.get("Agent Code")
+            bc = r.get("Branch") or r.get("Branch Code")
+            ac = r.get("Agent") or r.get("Agent Code")
+            net_premium = to_float(r.get("Net Premium (₹)"))
 
             conn.execute(text("""
                 INSERT INTO policies (
@@ -383,10 +443,10 @@ def seed_policies(wb):
                 "re": to_date(r.get("Risk End")),
                 "issue": to_date(r.get("Issue Date")),
                 "si": to_float(r.get("Sum Insured (₹)")),
-                "bp": to_float(r.get("Basic Premium (₹)")),
-                "np": to_float(r.get("Net Premium (₹)")),
-                "pm": r.get("Payment Mode"),
-                "pstatus": r.get("Policy Status", "ACTIVE"),
+                "bp": to_float(r.get("Basic Premium (₹)")) or net_premium,
+                "np": net_premium,
+                "pm": r.get("Pay Mode") or r.get("Payment Mode") or "ANNUAL",
+                "pstatus": r.get("Status") or r.get("Policy Status") or "ACTIVE",
                 "rc": to_int(r.get("Renewal Count")),
                 "ifp": to_bool(r.get("Is First Policy")),
             })
@@ -429,7 +489,7 @@ def seed_health_details(wb):
                 "tpa": r.get("TPA ID"),
                 "net": to_int(r.get("Network Hospitals")),
                 "covid": to_bool(r.get("COVID Covered")),
-                "ayush": to_bool(r.get("AYUSH Covered")),
+                "ayush": to_bool(r.get("AYUSH Covered")) or False,
             })
         conn.commit()
     logger.info("  → health details done.")
@@ -464,7 +524,7 @@ def seed_motor_details(wb):
                 "rto": r.get("RTO Code"),
                 "pt": r.get("Policy Type"),
                 "idv": to_float(r.get("IDV (₹)")),
-                "ncb": to_float(r.get("NCB %")),
+                "ncb": to_float(r.get("NCB %")) or 0.0,
                 "ncbc": r.get("NCB Certificate"),
                 "pa": to_bool(r.get("PA Cover Owner")),
                 "nd": to_bool(r.get("Nil Depreciation")),
@@ -644,8 +704,9 @@ def seed_insured_members(wb):
 
 def seed_campaigns(wb):
     logger.info("Seeding campaigns …")
+    sheet_name = "🎯 Campaigns" if "🎯 Campaigns" in wb.sheetnames else "🎯 Campaign"
     with engine.connect() as conn:
-        for r in read_sheet(wb, "🎯 Campaigns"):
+        for r in read_sheet(wb, sheet_name):
             cid = pad_uuid(r.get("Campaign UUID"))
             if not cid:
                 continue
@@ -683,6 +744,15 @@ def seed_reminders(wb):
             phone = r.get("Customer Phone")
             ch_name = r.get("Channel")
             ch_id = CHANNEL_MAP.get(ch_name, 1)
+            customer_id = conn.execute(
+                text("SELECT customer_id FROM policies WHERE id = :pid"),
+                {"pid": pol_id},
+            ).scalar()
+            if not customer_id and phone:
+                customer_id = conn.execute(
+                    text("SELECT id FROM customers WHERE phone = :phone LIMIT 1"),
+                    {"phone": phone},
+                ).scalar()
 
             conn.execute(text("""
                 INSERT INTO reminders (
@@ -694,7 +764,7 @@ def seed_reminders(wb):
                     agent_notes
                 ) VALUES (
                     :id, :camp, :pol,
-                    (SELECT id FROM customers WHERE phone = :phone LIMIT 1),
+                    :cust_id,
                     :ch,
                     :rw, :att, :fb,
                     :sched, :sent, :ds,
@@ -703,16 +773,16 @@ def seed_reminders(wb):
                 ) ON CONFLICT (id) DO NOTHING
             """), {
                 "id": rid, "camp": camp_id, "pol": pol_id,
-                "phone": phone, "ch": ch_id,
-                "rw": r.get("Reminder Window"),
-                "att": to_int(r.get("Attempt #")),
-                "fb": to_bool(r.get("Is Fallback")),
+                "cust_id": customer_id, "ch": ch_id,
+                "rw": r.get("Reminder Window") or "30DAY",
+                "att": to_int(r.get("Attempt #")) or 1,
+                "fb": to_bool(r.get("Is Fallback")) or False,
                 "sched": to_datetime(r.get("Scheduled At")),
                 "sent": to_datetime(r.get("Sent At")),
-                "ds": r.get("Delivery Status", "PENDING"),
-                "lc": to_bool(r.get("Link Clicked")),
-                "rac": to_bool(r.get("Renewed After Click")),
-                "ft": to_bool(r.get("Fallback Triggered")),
+                "ds": r.get("Delivery Status") or "PENDING",
+                "lc": to_bool(r.get("Link Clicked")) or False,
+                "rac": to_bool(r.get("Renewed After Click")) or False,
+                "ft": to_bool(r.get("Fallback Triggered")) or False,
                 "notes": r.get("Agent Notes"),
             })
         conn.commit()
@@ -726,6 +796,12 @@ def seed_whatsapp_logs(wb):
             lid = pad_uuid(r.get("Log UUID"))
             rid = pad_uuid(r.get("Reminder UUID"))
             if not lid or not rid:
+                continue
+            reminder_exists = conn.execute(
+                text("SELECT 1 FROM reminders WHERE id = :rid"),
+                {"rid": rid},
+            ).scalar()
+            if not reminder_exists:
                 continue
             conn.execute(text("""
                 INSERT INTO whatsapp_logs (
@@ -745,9 +821,9 @@ def seed_whatsapp_logs(wb):
                 "sent": to_datetime(r.get("Sent At")),
                 "del": to_datetime(r.get("Delivered At")),
                 "read": to_datetime(r.get("Read At")),
-                "ds": r.get("Delivery Status", "SENT"),
+                "ds": r.get("Delivery Status") or "SENT",
                 "btn": r.get("Button Clicked"),
-                "rr": to_bool(r.get("Reply Received")),
+                "rr": to_bool(r.get("Reply Received")) or False,
                 "rt": r.get("Reply Text"),
             })
         conn.commit()
@@ -761,6 +837,12 @@ def seed_sms_logs(wb):
             lid = pad_uuid(r.get("Log UUID"))
             rid = pad_uuid(r.get("Reminder UUID"))
             if not lid or not rid:
+                continue
+            reminder_exists = conn.execute(
+                text("SELECT 1 FROM reminders WHERE id = :rid"),
+                {"rid": rid},
+            ).scalar()
+            if not reminder_exists:
                 continue
             conn.execute(text("""
                 INSERT INTO sms_logs (
@@ -783,9 +865,9 @@ def seed_sms_logs(wb):
                 "dlt": r.get("DLT Template ID"),
                 "sent": to_datetime(r.get("Sent At")),
                 "del": to_datetime(r.get("Delivered At")),
-                "ds": r.get("Delivery Status", "SENT"),
+                "ds": r.get("Delivery Status") or "SENT",
                 "cost": to_float(r.get("Cost (₹)")),
-                "opt": to_bool(r.get("Is Opted Out")),
+                "opt": to_bool(r.get("Is Opted Out")) or False,
                 "err": r.get("Error Code"),
             })
         conn.commit()
@@ -799,6 +881,12 @@ def seed_email_logs(wb):
             lid = pad_uuid(r.get("Log UUID"))
             rid = pad_uuid(r.get("Reminder UUID"))
             if not lid or not rid:
+                continue
+            reminder_exists = conn.execute(
+                text("SELECT 1 FROM reminders WHERE id = :rid"),
+                {"rid": rid},
+            ).scalar()
+            if not reminder_exists:
                 continue
             conn.execute(text("""
                 INSERT INTO email_logs (
@@ -823,11 +911,11 @@ def seed_email_logs(wb):
                 "sent": to_datetime(r.get("Sent At")),
                 "opened": to_datetime(r.get("Opened At")),
                 "clicked": to_datetime(r.get("Clicked At")),
-                "ds": r.get("Delivery Status", "SENT"),
+                "ds": r.get("Delivery Status") or "SENT",
                 "bt": r.get("Bounce Type"),
                 "oc": to_int(r.get("Open Count")),
                 "cc": to_int(r.get("Click Count")),
-                "unsub": to_bool(r.get("Is Unsubscribed")),
+                "unsub": to_bool(r.get("Is Unsubscribed")) or False,
             })
         conn.commit()
     logger.info("  → email logs done.")
@@ -840,6 +928,12 @@ def seed_voice_logs(wb):
             lid = pad_uuid(r.get("Log UUID"))
             rid = pad_uuid(r.get("Reminder UUID"))
             if not lid or not rid:
+                continue
+            reminder_exists = conn.execute(
+                text("SELECT 1 FROM reminders WHERE id = :rid"),
+                {"rid": rid},
+            ).scalar()
+            if not reminder_exists:
                 continue
             conn.execute(text("""
                 INSERT INTO voice_logs (
@@ -863,12 +957,12 @@ def seed_voice_logs(wb):
                 "init": to_datetime(r.get("Initiated At")),
                 "ans": to_datetime(r.get("Answered At")),
                 "dur": to_int(r.get("Duration (secs)")),
-                "outcome": r.get("Call Outcome", "PENDING"),
+                "outcome": r.get("Call Outcome") or "PENDING",
                 "ivr": r.get("IVR Key Pressed"),
-                "interested": to_bool(r.get("Is Interested")),
-                "cbr": to_bool(r.get("Callback Requested")),
+                "interested": to_bool(r.get("Is Interested")) or False,
+                "cbr": to_bool(r.get("Callback Requested")) or False,
                 "cbt": to_datetime(r.get("Callback Time")),
-                "retry": to_int(r.get("Retry #")),
+                "retry": to_int(r.get("Retry #")) or 1,
             })
         conn.commit()
     logger.info("  → voice logs done.")
@@ -883,6 +977,11 @@ def seed_renewal_tokens(wb):
             cid = pad_uuid(r.get("Customer UUID"))
             if not tid or not pid:
                 continue
+            if not cid:
+                cid = conn.execute(
+                    text("SELECT customer_id FROM policies WHERE id = :pid"),
+                    {"pid": pid},
+                ).scalar()
             ch_code = r.get("Channel")
             ch_id = CHANNEL_MAP.get(ch_code, 1)
             sc = r.get("Short Code", "")
@@ -962,8 +1061,33 @@ def seed_payments(wb):
             camp_id = pad_uuid(r.get("Campaign UUID"))
             if not pyid or not pid:
                 continue
+            if not cid:
+                cid = conn.execute(
+                    text("SELECT customer_id FROM policies WHERE id = :pid"),
+                    {"pid": pid},
+                ).scalar()
             ch_code = r.get("Channel Source")
             ch_id = CHANNEL_MAP.get(ch_code, 1)
+            amount = to_float(r.get("Amount (₹)")) or to_float(r.get("Basic Premium (₹)")) or 0.0
+            if amount <= 0:
+                amount = conn.execute(
+                    text("SELECT net_premium FROM policies WHERE id = :pid"),
+                    {"pid": pid},
+                ).scalar() or 1.0
+            amount = float(amount)
+            gst = float(to_float(r.get("GST (₹)")) or 0.0)
+            total = to_float(r.get("Total (₹)")) or (amount + gst)
+            status_raw = (r.get("Status") or "COMPLETED").upper()
+            status_map = {
+                "SUCCESS": "COMPLETED",
+                "PAID": "COMPLETED",
+                "DONE": "COMPLETED",
+                "IN_PROGRESS": "PENDING",
+            }
+            status = status_map.get(status_raw, status_raw)
+            allowed_statuses = {"INITIATED", "COMPLETED", "FAILED", "REFUNDED", "PENDING"}
+            if status not in allowed_statuses:
+                status = "COMPLETED"
             conn.execute(text("""
                 INSERT INTO payments (
                     id, policy_id, customer_id, campaign_id,
@@ -985,11 +1109,11 @@ def seed_payments(wb):
                 "ch": ch_id, "gw": r.get("Gateway", "RAZORPAY"),
                 "goid": r.get("Gateway Order ID"),
                 "gtid": r.get("Gateway Txn ID"),
-                "amt": to_float(r.get("Amount (₹)")),
-                "gst": to_float(r.get("GST (₹)")),
-                "total": to_float(r.get("Total (₹)")),
-                "pm": r.get("Payment Method"),
-                "st": r.get("Status"),
+                "amt": amount,
+                "gst": gst,
+                "total": total,
+                "pm": r.get("Payment Method") or "UPI",
+                "st": status,
                 "comp": to_datetime(r.get("Completed At")),
                 "prf": to_date(r.get("Policy Renewed From")),
                 "prt": to_date(r.get("Policy Renewed To")),
@@ -1004,6 +1128,7 @@ def main():
     parser = argparse.ArgumentParser(description="Seed the RenewIQ database")
     parser.add_argument("--schema-only", action="store_true", help="Only create tables")
     parser.add_argument("--data-only", action="store_true", help="Only insert sample data")
+    parser.add_argument("--reset-data", action="store_true", help="Delete existing business data before insert")
     args = parser.parse_args()
 
     validate_database_url(settings.DATABASE_URL)
@@ -1011,9 +1136,16 @@ def main():
 
     try:
         if not args.data_only:
-            run_schema()
+            # Prevent duplicate-table crashes on already initialized environments.
+            if inspect(engine).has_table("policies"):
+                logger.info("Schema already present; skipping schema creation.")
+            else:
+                run_schema()
 
         if not args.schema_only:
+            if args.reset_data:
+                reset_data_only()
+
             populate_maps()
             import openpyxl
 

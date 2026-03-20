@@ -2,8 +2,8 @@
 Integration-style tester for WhatsApp and Email channels with fallback behavior.
 
 Usage examples:
-  python testwhatsapp.py --phone +919893010159 --email gaganverma5131@gmail.com --name "Test User"
-
+  python testwhatsapp.py --phone +918349101211 --email gaganverma5131@gmail.com --name "Test User"
+  python testwhatsapp.py --phone +919893010159 --email vermagagan3347@gmail.com
 Notes:
 - This script uses real Twilio/SendGrid calls unless simulation flags are used.
 - Make sure .env has valid credentials before running real sends.
