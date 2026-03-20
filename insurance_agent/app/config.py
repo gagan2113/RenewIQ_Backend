@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     SENDGRID_API_KEY: str = ""
     SENDGRID_FROM_EMAIL: str = "noreply@renewiq.app"
     SENDGRID_FROM_NAME: str = "RenewIQ"
+    SENDGRID_TEMPLATE_ID: str = ""
     SENDGRID_DATA_RESIDENCY: str = ""
     ELEVENLABS_API_KEY: str = ""
     SENDGRID_WEBHOOK_SIGNING_KEY: str = ""
